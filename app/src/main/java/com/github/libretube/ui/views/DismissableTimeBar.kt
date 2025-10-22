@@ -29,6 +29,7 @@ open class DismissableTimeBar(
     private var waitingForDrag: Boolean = false
     private var dragStarted: Boolean = false
     private val touchSlopPx: Int = ViewConfiguration.get(context).scaledTouchSlop
+    private var startXAtCurrentProgress: Float = 0f
 
     init {
         addSeekBarListener(object : OnScrubListener {
@@ -63,10 +64,14 @@ open class DismissableTimeBar(
                     val dx = abs(event.x - initialX)
                     val dy = abs(event.y - initialY)
                     if (dx > touchSlopPx || dy > touchSlopPx) {
-                        // Begin scrubbing now by synthesizing a DOWN at the initial position
+                        // Compute starting X based on current player progress so the thumb
+                        // starts from the current playback position (YouTube-like behavior)
+                        startXAtCurrentProgress = computeXForCurrentProgress()
+
+                        // Begin scrubbing now by synthesizing a DOWN at the current progress X
                         val fakeDown = MotionEvent.obtain(event)
                         fakeDown.action = MotionEvent.ACTION_DOWN
-                        fakeDown.setLocation(initialX, initialY)
+                        fakeDown.setLocation(startXAtCurrentProgress, event.y)
                         super.onTouchEvent(fakeDown)
                         fakeDown.recycle()
 
@@ -78,15 +83,26 @@ open class DismissableTimeBar(
                     }
                 }
 
-                // Forward MOVE only after we've started dragging
-                if (dragStarted) return super.onTouchEvent(event)
+                // Forward MOVE only after we've started dragging, with relative X
+                if (dragStarted) {
+                    val forwardX = clampToTrack(startXAtCurrentProgress + (event.x - initialX))
+                    val fakeMove = MotionEvent.obtain(event)
+                    fakeMove.setLocation(forwardX, event.y)
+                    val handled = super.onTouchEvent(fakeMove)
+                    fakeMove.recycle()
+                    return handled
+                }
                 return true
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 // If we started a drag, forward the terminal event to finish scrubbing
                 if (dragStarted) {
-                    val handled = super.onTouchEvent(event)
+                    val forwardX = clampToTrack(startXAtCurrentProgress + (event.x - initialX))
+                    val fakeUp = MotionEvent.obtain(event)
+                    fakeUp.setLocation(forwardX, event.y)
+                    val handled = super.onTouchEvent(fakeUp)
+                    fakeUp.recycle()
                     waitingForDrag = false
                     dragStarted = false
                     return handled
@@ -102,6 +118,23 @@ open class DismissableTimeBar(
         }
 
         return super.onTouchEvent(event)
+    }
+
+    private fun computeXForCurrentProgress(): Float {
+        val durationMs = exoPlayer?.duration?.takeIf { it > 0 } ?: 0L
+        val positionMs = exoPlayer?.currentPosition ?: 0L
+        val fraction = if (durationMs > 0) positionMs.toFloat() / durationMs.toFloat() else 0f
+        val left = paddingLeft.toFloat()
+        val right = (width - paddingRight).toFloat()
+        val barWidth = (right - left).coerceAtLeast(1f)
+        val unclampedX = left + fraction * barWidth
+        return clampToTrack(unclampedX)
+    }
+
+    private fun clampToTrack(x: Float): Float {
+        val left = paddingLeft.toFloat()
+        val right = (width - paddingRight).toFloat()
+        return x.coerceIn(left, right)
     }
 
     /**
